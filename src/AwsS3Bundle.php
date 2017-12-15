@@ -2,7 +2,7 @@
 /**
  * @link      https://craftcms.com/
  * @copyright Copyright (c) Pixel & Tonic, Inc.
- * @license   https://craftcms.com/license
+ * @license   MIT
  */
 
 namespace craft\awss3;
@@ -24,10 +24,6 @@ class AwsS3Bundle extends AssetBundle
 
         $this->depends = [
             CpAsset::class,
-        ];
-
-        $this->css = [
-            'image_editor.css',
         ];
 
         $this->js = [

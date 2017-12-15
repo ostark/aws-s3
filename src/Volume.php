@@ -1,24 +1,26 @@
 <?php
 /**
- * @link      http://buildwithcraft.com/
- * @copyright Copyright (c) 2015 Pixel & Tonic, Inc.
- * @license   http://buildwithcraft.com/license
+ * @link      https://craftcms.com/
+ * @copyright Copyright (c) Pixel & Tonic, Inc.
+ * @license   MIT
  */
+
 namespace craft\awss3;
 
 use Aws\CloudFront\CloudFrontClient;
 use Aws\CloudFront\Exception\CloudFrontException;
+use Aws\Credentials\Credentials;
 use Aws\Handler\GuzzleV6\GuzzleHandler;
 use Aws\S3\Exception\S3Exception;
 use Aws\S3\S3Client;
+use Aws\Sts\StsClient;
 use Craft;
-use craft\errors\VolumeException;
+use craft\base\FlysystemVolume;
 use craft\helpers\Assets;
 use craft\helpers\DateTimeHelper;
 use craft\helpers\StringHelper;
 use DateTime;
 use League\Flysystem\AwsS3v3\AwsS3Adapter;
-
 
 /**
  * Class Volume
@@ -29,7 +31,7 @@ use League\Flysystem\AwsS3v3\AwsS3Adapter;
  * @author Pixel & Tonic, Inc. <support@pixelandtonic.com>
  * @since  3.0
  */
-class Volume extends \craft\base\Volume
+class Volume extends FlysystemVolume
 {
     // Constants
     // =========================================================================
@@ -37,6 +39,16 @@ class Volume extends \craft\base\Volume
     const STORAGE_STANDARD = 'STANDARD';
     const STORAGE_REDUCED_REDUNDANCY = 'REDUCED_REDUNDANCY';
     const STORAGE_STANDARD_IA = 'STANDARD_IA';
+
+    /**
+     * Cache key to use for caching purposes
+     */
+    const CACHE_KEY_PREFIX = 'aws.';
+
+    /**
+     * Cache duration for access token
+     */
+    const CACHE_DURATION_SECONDS = 3600;
 
     // Static
     // =========================================================================
@@ -116,7 +128,7 @@ class Volume extends \craft\base\Volume
      */
     public function getSettingsHtml()
     {
-        return Craft::$app->getView()->renderTemplate('awss3/volumeSettings', [
+        return Craft::$app->getView()->renderTemplate('aws-s3/volumeSettings', [
             'volume' => $this,
             'periods' => array_merge(['' => ''], Assets::periodList()),
             //'storageClasses' => static::storageClasses(),
@@ -135,7 +147,7 @@ class Volume extends \craft\base\Volume
     public static function loadBucketList($keyId, $secret)
     {
         // Any region will do.
-        $config = static::_buildConfigArray($keyId, $secret, 'us-east-1');
+        $config = self::_buildConfigArray($keyId, $secret, 'us-east-1');
 
         $client = static::client($config);
 
@@ -150,7 +162,7 @@ class Volume extends \craft\base\Volume
 
         foreach ($buckets as $bucket) {
             try {
-                $location = $client->getBucketLocation(['Bucket' => $bucket['Name']]);
+                $location = $client->determineBucketRegion($bucket['Name']);
             } catch (S3Exception $exception) {
                 continue;
             }
@@ -158,7 +170,7 @@ class Volume extends \craft\base\Volume
             $bucketList[] = [
                 'bucket' => $bucket['Name'],
                 'urlPrefix' => 'http://'.$bucket['Name'].'.s3.amazonaws.com/',
-                'region' => $location['LocationConstraint'] ?? ''
+                'region' => $location ?? ''
             ];
         }
 
@@ -262,8 +274,8 @@ class Volume extends \craft\base\Volume
                     ]
                 );
             } catch (CloudFrontException $exception) {
+                // Log the warning, most likely due to 404. Allow the operation to continue, though.
                 Craft::warning($exception->getMessage());
-                throw new VolumeException('Failed to invalidate the CDN path for '.$path);
             }
         }
 
@@ -294,7 +306,7 @@ class Volume extends \craft\base\Volume
         $secret = $this->secret;
         $region = $this->region;
 
-        return static::_buildConfigArray($keyId, $secret, $region);
+        return self::_buildConfigArray($keyId, $secret, $region);
     }
 
     /**
@@ -308,21 +320,31 @@ class Volume extends \craft\base\Volume
      */
     private static function _buildConfigArray($keyId = null, $secret = null, $region = null)
     {
-        if (empty($keyId) || empty($secret)) {
-            $config = [];
-        } else {
-            // TODO Add support for different credential supply methods
-            // And look into v4 signature token caching.
-            $config = [
-                'credentials' => [
-                    'key' => $keyId,
-                    'secret' => $secret
-                ]
-            ];
-        }
+        $config = [
+            'region' => $region,
+            'version' => 'latest'
+        ];
 
-        $config['region'] = $region;
-        $config['version'] = 'latest';
+        if (empty($keyId) || empty($secret)) {
+            // Assume we're running on EC2 and we have an IAM role assigned. Kick back and relax.
+        } else {
+            $tokenKey = static::CACHE_KEY_PREFIX.md5($keyId.$secret);
+            $credentials = new Credentials($keyId, $secret);
+
+            if (Craft::$app->cache->exists($tokenKey)) {
+                $cached = Craft::$app->cache->get($tokenKey);
+                $credentials->unserialize($cached);
+            } else {
+                $config['credentials'] = $credentials;
+                $stsClient = new StsClient($config);
+                $result = $stsClient->getSessionToken(['DurationSeconds' => static::CACHE_DURATION_SECONDS]);
+                $credentials = $stsClient->createCredentials($result);
+                Craft::$app->cache->set($tokenKey, $credentials->serialize(), static::CACHE_DURATION_SECONDS);
+            }
+
+            // TODO Add support for different credential supply methods
+            $config['credentials'] = $credentials;
+        }
 
         $client = Craft::createGuzzleClient();
         $config['http_handler'] = new GuzzleHandler($client);

@@ -2,7 +2,7 @@
 /**
  * @link      https://craftcms.com/
  * @copyright Copyright (c) Pixel & Tonic, Inc.
- * @license   https://craftcms.com/license
+ * @license   MIT
  */
 
 namespace craft\awss3\migrations;
@@ -86,7 +86,6 @@ class Install extends Migration
                     ->update('{{%volumes}}', $values, ['id' => $volume['id']])
                     ->execute();
             }
-
         }
     }
 }
